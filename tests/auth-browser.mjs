@@ -1,0 +1,42 @@
+import {chromium} from '../frontend/node_modules/@playwright/test/index.mjs';
+import {readFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const fixture=JSON.parse(await readFile('/tmp/wiavoice-auth-fixture.json','utf8'));
+const origin='https://axforwork.wia.co.kr';
+const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+try{
+ const context=await browser.newContext({viewport:{width:1600,height:1100}});
+ const page=await context.newPage();
+ await page.goto(origin+'/wiavoice/');
+ await page.waitForURL('**/login?next=**');
+ assert.equal((await context.request.get(origin+'/wiavoice/api/catalog')).status(),401);
+ console.log('Anonymous document redirects and API denied');
+ const login=await context.request.post(origin+'/api/auth/login',{headers:{Origin:origin,'X-AX-Request':'1'},data:{employee_id:fixture.employee_id,password:fixture.password}});
+ if(login.status()!==200)console.log(await login.text());
+ assert.equal(login.status(),200);
+ const cookies=await context.cookies();
+ const cookie=cookies.find(x=>x.name==='ax_platform_session');
+ assert(cookie&&cookie.httpOnly&&cookie.secure&&cookie.path==='/');
+ await page.goto(origin+'/login?next=%2Fwiavoice%2F');
+ await page.waitForURL('**/wiavoice/',{timeout:20000});
+ await page.getByRole('heading',{name:'Voice 생성',exact:true}).waitFor();
+ await page.locator('.account-menu').getByText('WiaVoice 인증 검증').waitFor();
+ await page.getByText('로그아웃하거나 로그인 세션이 만료되면 생성한 음성이 삭제됩니다.',{exact:true}).waitFor();
+ const me=await context.request.get(origin+'/wiavoice/api/auth/me');
+ assert.equal((await me.json()).user_id,fixture.user_id);
+ assert.deepEqual(await (await context.request.get(origin+'/wiavoice/api/jobs')).json(),[]);
+ const catalog=await (await context.request.get(origin+'/wiavoice/api/catalog')).json();
+ const preview=catalog.previews.qwen.Sohee.neutral;
+ const audio=await context.request.get(origin+preview,{headers:{Range:'bytes=0-100'}});
+ assert.equal(audio.status(),206);
+ await page.screenshot({path:'test-results/platform-auth.png',fullPage:true});
+ assert.equal((await context.request.get(origin+'/wianews/api/auth/me')).status(),200);
+ console.log('Shared platform login, return path, user UI, private history and audio verified');
+ await page.getByRole('button',{name:'로그아웃',exact:true}).click();
+ await page.waitForURL('**/login?next=**');
+ for(const path of ['/api/auth/me','/wiavoice/api/auth/me','/wianews/api/auth/me'])assert.equal((await context.request.get(origin+path)).status(),401);
+ // Even a retained cookie must fail after database revocation.
+ await context.addCookies([cookie]);
+ assert.equal((await context.request.get(origin+'/wiavoice/api/auth/me')).status(),401);
+ console.log('Global logout and revoked-cookie replay denied');
+}finally{await browser.close();}

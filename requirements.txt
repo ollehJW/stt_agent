@@ -1,0 +1,9 @@
+fastapi==0.143.0
+uvicorn
+httpx
+python-multipart
+numpy
+soundfile
+psycopg[binary]>=3.2,<4
+python-dotenv>=1,<2
+soxr>=0.5,<2

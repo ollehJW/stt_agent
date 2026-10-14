@@ -1,0 +1,284 @@
+WiaVoice — desktop voice generation
+==================================
+
+Public URL: https://axforwork.wia.co.kr/wiavoice/
+Target: jongwook@10.18.23.40, SSH port 31000
+Project: /home/jongwook/wiavoice
+Data: /data/wiavoice
+Models and inference environment: /home/jongwook/wiatts, /data/wiatts/models
+
+React is built with Vite. A Node static server listens on 0.0.0.0:1005
+(mapped externally to 31025). It forwards /api/* to FastAPI on 127.0.0.1:1015.
+Both /wiavoice/* and stripped /* requests are accepted by the frontend server.
+AX for Works gateway strips /wiavoice and forwards to http://127.0.0.1:1005.
+The gateway entry sets require_login: false for the public introduction. The /wiavoice/agent screen checks the shared session and redirects to platform login; content APIs independently enforce authentication. Login returns to /wiavoice/agent. No service-local accounts or sessions exist.
+All content APIs validate ax_platform_session against platform.sessions joined
+with active platform.users on every request, including audio downloads. Session
+expiry and revocation apply immediately. WiaVoice logout revokes the shared
+session across services. Cookies remain HttpOnly, Secure, SameSite=Strict, Path=/.
+Only /api/health is public (and logout accepts expired sessions).
+Database connection settings are in /data/wiavoice/auth.env, mode 0600; never
+commit or serve that file. The wiavoice schema in wia_platform is owned by wia_platform_admin.
+wiavoice.voices stores durable My Voice metadata. Shared accounts and sessions
+stay in platform; temporary generation jobs still use session JSON/WAV files.
+
+Features
+--------
+* Up to 500 characters of speech text.
+* No language selectors are displayed for any model. Qwen always receives
+  language=Auto at the inference boundary, including legacy API requests.
+* Fish/Higgs follow the input text. The UI uses Korean preset cloning references
+  by default; it does not expose a reference-language control.
+* Legacy language and reference_language fields are accepted for compatibility;
+  output language is normalized to auto and Qwen cannot override it.
+* Select a voice and one of its emotion combination cards. Each preview uses
+  the selected model, voice and emotion (never a reused neutral Qwen clip).
+* 405 built-in previews: Qwen 99, Fish 108, Higgs 198. WAV files and provenance
+  JSON live in /data/wiavoice/previews. ops/seed_previews.py resumes generation
+  through the existing service queue. backend/previews.py versions preview IDs.
+  A catalog entry appears only when its audio file is complete.
+* Preview text is fixed Korean and does not include free-form instructions.
+  The actual speech text and instructions are used only for full generation.
+* Voice & Mood has three columns: Voice, Mood, sample listening. Custom Voice
+  selection and upload appear at the bottom of the Voice column.
+* Custom Voice does not offer sample listening or preview generation. Its
+  listening column explicitly displays this limitation. Uploads still work for
+  full speech generation with the selected mood.
+* Nine Qwen voices are offered on all models. Their 18 neutral reference clips
+  (nine voices x two languages) live in /data/wiavoice/voices.
+* Qwen CustomVoice uses built-in speakers and natural-language instructions.
+  Emotion buttons are suggested prompts, not an official finite emotion list.
+* Fish accepts selected emotions and free-form delivery instructions as tags.
+* Higgs offers its 21 official emotions plus neutral (no emotion tag).
+  Its additional settings are speed, pitch, expression intensity and style.
+  The API accepts a validated higgs_options object, only for Higgs. Default
+  values add no tags.
+  Inline pause/sound-effect UI and generation support have been removed.
+  Emotion/prosody/style tags are repeated at sentence
+  boundaries and newlines. Existing previews retain their original settings.
+  Arbitrary free-form instruction text is intentionally not sent to Higgs.
+* Fish/Higgs Custom Voice: WAV, MP3, FLAC, OGG; max 20 MB, 3–30 seconds,
+  mono/stereo, 8–192 kHz. Actual decoding is validated and converted to mono
+  PCM WAV. M4A/AAC/WebM are not advertised or accepted in this first version.
+* Custom Voice no longer asks for a reference transcript. Audio is passed
+  with an empty transcript; no STT service is called. Preset references retain
+  their pre-generated transcripts. Additional style instructions are separate.
+* WAV playback/download and recent results scoped to the platform login session.
+  GET /api/jobs returns the latest 20 jobs in that session; no localStorage IDs.
+  Jobs record owner_id and a SHA-256 session key; upload metadata records owner_id. Other users and ownerless legacy
+  files return 404. Historical anonymous outputs are preserved, not reassigned.
+  Generated JSON and WAV files are under sessions/<session-hash>/jobs and outputs.
+  WiaVoice logout removes the session directory immediately. Every 30 seconds,
+  and on startup, the reaper removes directories whose platform sessions are
+  revoked/expired or whose users are inactive/require a password change.
+  Database outages preserve directories and retry. Tabs closing does not end a
+  platform session. Queued/in-flight jobs cannot recreate a removed directory.
+  Preset voices, previews, custom uploads, and legacy anonymous files are outside
+  this session-results lifecycle. No count-based automatic deletion is enabled.
+
+My Voice
+--------
+The sidebar My Voice menu lists the authenticated user's saved audio with
+name/text search, playback, WAV downloads and 6-item pagination. Generation
+results have two adjacent actions: download and save. Save opens a name dialog
+(1–100 trimmed characters); names are never used as filesystem paths.
+
+POST /api/jobs/{job_id}/save accepts {"name":"..."} for a completed result in
+the current user's current session. The audio is copied to:
+  /data/wiavoice/workspace/{user_id}/{voice_id}/audio.wav
+Workspace files are independent copies, never symlinks into session storage.
+They remain after logout, session cleanup and service restarts.
+GET /api/my-voices returns only the current user's records; audio/download
+requests also check the platform session and the row's owner.
+
+Migration: ops/migrate_voices.py explicitly applies backend/sql/voices.sql.
+wiavoice.voices columns: voice_id, user_id (platform.users FK), source_job_id,
+name, model, speaker, emotion, text, instructions, generation_options (JSONB),
+duration_seconds, sample_rate, file_size, audio_sha256, created_at, updated_at.
+The audio path is derived from the two validated IDs, not stored user input.
+source_job_id is nullable for merged outputs; model also accepts merged.
+Unique(user_id, source_job_id) and a transaction advisory lock make retries and
+double clicks idempotent. A failed database transaction removes its new copy.
+The user/creation index supports history pagination. No account/session tables
+are duplicated. Renaming saved voices is not implemented. Cards offer confirmed deletion.
+
+Validation: WIAVOICE_TEST_DB=1 python -m unittest discover -s tests -v
+opts into integration tests using isolated temporary users and a temporary
+filesystem. All test database records are removed by teardown. Browser test
+my-voice-browser.mjs uses the external temporary auth fixture, generates one
+real Qwen clip and verifies saving, search, playback, download, and persistence
+after logout/re-login. Test artifacts must be removed after live verification.
+
+My Voice deletion and pagination
+--------------------------------
+My Voice shows six saved voices per page (3 columns x 2 rows), with Previous /
+Next navigation and automatic fallback when the last item on a page is removed.
+The previous total/saved-voices/retention banner is no longer displayed.
+GET /api/my-voices defaults to limit=6; the merge picker explicitly requests 20.
+DELETE /api/my-voices/{voice_id} validates ownership and deletes both the row
+and workspace voice directory. A confirmation dialog names the voice and
+requires an explicit Delete click; Cancel/Escape keep it intact.
+
+Deletion shares the merge submission advisory lock. A queued/running source
+returns 409 until the merge completes. Completed merged copies remain usable
+when a source is removed. Deleting a merged result clears its merge_action
+result_voice_id but preserves the action history (shown as result deleted).
+The file directory is atomically parked before DB commit and restored on
+rollback. Every 30 seconds the cleanup loop recovers interrupted deletions:
+it restores parked audio if its DB record survives, or removes it if deletion
+committed. No soft-deleted Voice remains visible or downloadable.
+
+Tests cover owner isolation, DB/file cleanup, active-merge exclusion, merged
+history, rollback/recovery and six-item paging. tests/delete-browser.mjs uses
+13 isolated fixtures to check 1–6 / 7–12 navigation, confirmation/cancel, and
+returning to the previous page after deleting the final page's only voice.
+
+Voice merge
+-----------
+My Voice > Voice 병합 opens a selection/order editor (2–20 saved voices), with
+up/down ordering and a 0–30 second gap per boundary (default 0.5; bulk apply).
+The next popup sets the output name. The total including gaps is capped at
+30 minutes. Both original and already-merged voices can be used as sources.
+
+POST /api/merge-actions accepts name, request_id (random 32 hex idempotency key),
+voice_ids in order, and gaps_seconds (exactly N-1 finite values).
+GET /api/merge-actions returns the user's latest 10 tasks for status/progress.
+Only the authenticated user's saved files can be selected, listed or played.
+Up to three unfinished merge actions per user are accepted at once.
+
+Explicit migration: ops/migrate_merge.py (after ops/migrate_voices.py on a new
+installation). It allows model=merged and source_job_id=NULL in voices, then
+creates wiavoice.merge_action: action_id, user_id, request_id, request_hash,
+name, input_voices (ordered snapshots), gaps_seconds, status, progress,
+result_voice_id, error_message, created_at, started_at, completed_at, updated_at.
+Unique(user_id,request_id) prevents duplicate submission retries; changed input
+with the same key is rejected. Status is queued/running/completed/failed.
+
+A separate CPU worker polls the PostgreSQL queue every two seconds. It streams
+and resamples inputs using soxr to 48 kHz mono PCM16 WAV, writes exact digital
+silence only between clips, and never starts a TTS/GPU model. Output goes to
+workspace/{user_id}/{action_id}/audio.wav; the action ID doubles as voice_id.
+Source files remain unchanged. Result text joins source texts in order with
+blank lines; source_job_id is NULL, model is merged, speaker/emotion are retained
+when identical or set to mixed. generation_options records source snapshots and
+gaps; nested merged sources refer to their own merge action rather than copying
+an unbounded recursive tree. Audio duration/size/checksum come from the output.
+Voice insertion and completed-action linkage commit in one database transaction.
+Failed work cleans its partial output and records a safe error message.
+
+The worker drains current work on graceful shutdown. At startup interrupted
+running work is marked failed and partial output removed; queued work resumes.
+Merge actions and saved results are account-owned, independent of login sessions.
+Logging out does not cancel a submitted merge. Use one uvicorn process as before.
+
+Tests include mixed sample rates/channels, sample-exact boundary silence, source
+order/text, preservation, private access, idempotency and interruption recovery.
+tests/merge-browser.mjs verifies the full UI with three temporary saved voices,
+reordering, unequal gaps, naming, queue completion, playback and re-login.
+
+Runtime
+-------
+The existing supervisor has two added programs:
+  wiavoice-backend
+  wiavoice-frontend
+
+Status:
+  /home/jongwook/ax_for_works/.venv/bin/supervisorctl \
+    -c /data/ax_for_works/supervisord.conf status wiavoice-backend wiavoice-frontend
+
+Restart after a backend change:
+  /home/jongwook/ax_for_works/.venv/bin/supervisorctl \
+    -c /data/ax_for_works/supervisord.conf restart wiavoice-backend
+
+Frontend source is in frontend/src. Run npm ci and npm run build in frontend
+using Node 24. Built assets are served directly; server.mjs changes require
+restarting only wiavoice-frontend through supervisor.
+
+FastAPI uses the already configured /home/jongwook/wiatts/.venv (same Torch
+environment as the previous sample generation). Do not reinstall or upgrade
+Torch/Transformers independently in this shared environment.
+
+One bounded queue (10 waiting jobs) and one model process group are managed
+by the backend. Use one uvicorn worker. Model changes unload the previous
+model and load the requested model. Cold starts take roughly 1–3 minutes.
+An idle model is released after 10 minutes. Existing WiaMeet GPU processes
+are not managed by WiaVoice.
+
+Inference listeners are loopback-only ports 18180/18181/18182, using the
+existing wiatts/launch_model.sh. Do not run the old standalone generation
+scripts concurrently with WiaVoice; they use these same listeners.
+
+Jobs and outputs persist as JSON and WAV files in /data/wiavoice/sessions,
+not a database. A restart restores session jobs and marks unfinished jobs
+failed; the cleanup task validates those sessions with the platform database.
+Legacy /data/wiavoice/jobs and outputs files are preserved but no longer loaded.
+Custom uploads and preset references remain in their existing directories.
+Session-result folders are removed on logout/expiry as described above.
+
+Backend/frontend logs: /data/wiavoice/logs/
+Model logs: /data/wiavoice/logs/engine-{qwen,fish,higgs}.log
+Original gateway/supervisor backups: /data/wiavoice/backups/
+ops/install_runtime.py adds WiaVoice without restarting other services.
+If the platform regenerates its entire supervisor config, re-run that script
+to restore the WiaVoice program entries.
+
+Validation
+----------
+Target unit/integration tests (mock inference, real file decoding):
+  cd /home/jongwook/wiavoice
+  /home/jongwook/wiatts/.venv/bin/python -m unittest discover -s tests -v
+
+Browser UI checks (real previews, mocked generation submission):
+  REQUIRE_ALL_PREVIEWS=1 node tests/combinations-ui.mjs
+
+Preview file/provenance audit on target:
+  /home/jongwook/wiatts/.venv/bin/python tests/audit_previews.py
+
+Optional full live inference regression (six actual GPU generations):
+  node tests/browser.mjs
+This test generates real audio on the target GPU and uses public HTTPS.
+It covers mixed-language Qwen, English Qwen, English preset and Korean
+custom-reference generation on Higgs/Fish, preview, download and history.
+Artifacts are under test-results/.
+
+Sources checked 2026-10-14
+--------------------------
+https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+https://huggingface.co/fishaudio/s2-pro
+https://huggingface.co/bosonai/higgs-tts-3-4b/blob/main/PROMPTING.md
+https://sgl-project.github.io/sglang-omni/cookbook/fishaudio_s2_pro.html
+https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html
+
+Authentication validation
+-------------------------
+Unit tests include cookie validation, unavailable DB, required password changes,
+CSRF origin rejection, cross-user job/upload access, and shared logout.
+tests/auth-browser.mjs uses a temporary fixture file outside the repository to
+verify actual platform login, return routing, cookie attributes, shared WiaNews
+identity, audio range playback, logout, and replay of a revoked cookie.
+It never stores real-user sessions. Remove the test account after validation.
+Login checks run at page load, focus, and every 30 seconds. Every API request
+independently validates the database session. Unauthorized responses redirect
+to the canonical platform login URL.
+
+Suggested next options
+----------------------
+Qwen: VoiceDesign and Base voice cloning as separately installed models.
+Higgs: speed, pitch, expression intensity, whisper/shout styles, pause controls.
+Fish: sentence-level inline delivery changes, emphasis, pauses and streaming.
+Common: pronunciation dictionary, A/B comparisons, retention policy,
+long-text splitting and streaming playback.
+
+Account UI (2026-10-14)
+-----------------------
+Uses the same AXAccount.jsx and axAccount.css as WiaNews. Name, team (or admin label), and logout appear at the sidebar foot on Voice creation and My Voice. Logout retains the existing shared-session revocation endpoint. Previous source and entry HTML are backed up in /data/wiavoice/backups/account-ui-20261014. This deployment directory is not a Git checkout.
+
+Temporary upload retention (2026-10-14)
+--------------------------------------
+The session reaper checks uploads every 30 seconds (also on startup). Only UUID-named .wav/.json pairs under /data/wiavoice/uploads are deleted after their newest file mtime is at least 24 hours old; legacy uploads and orphan files follow the same policy. Queued/loading/generating custom-voice jobs protect referenced uploads. A separate running-upload set keeps the reference protected even if logout removes the job from session history. Generation and cleanup run on the same single ASGI event loop without yielding between reference checks and deletion. Do not deploy multiple ASGI workers without adding interprocess coordination. Published marketplace files and My Voice/workspace files are never cleaned by this task. No database schema changes.
+
+Introduction routing (2026-10-14)
+--------------------------------
+/wiavoice redirects to /wiavoice/ (public introduction). /wiavoice/agent is the authenticated application. Legacy #app, #create, #my-voice, #marketplace introduction-root bookmarks redirect to the agent screen. Video and PDF URLs are configured in frontend/src/introContent.js; null displays an intentional placeholder without requesting missing files. Place future assets under frontend/public/media and set the /wiavoice/media/... URLs, then rebuild. Shared AX favicon is included. The gateway runtime setting is /data/ax_for_works/config/config.yaml; it reloads automatically. No backend data or inference settings changed.
+
+Introduction film (2026-10-14): WiaVoice_intro.mp4 (95 seconds, 1920x1080) is stored in /data/wiavoice/media. frontend/public/media points to that directory; builds copy files into dist/media. introContent.js selects the video. The static server supports single byte ranges for MP4 seeking. The CREATE / KEEP / CONNECT section was removed; the PDF guide remains pending.

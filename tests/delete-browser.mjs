@@ -1,0 +1,31 @@
+import {chromium,expect} from '../frontend/node_modules/@playwright/test/index.mjs';
+import {readFile,writeFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const fixture=JSON.parse(await readFile('/tmp/wiavoice-auth-fixture.json','utf8'));
+const origin='https://axforwork.wia.co.kr';
+const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+try{
+ const context=await browser.newContext({viewport:{width:1600,height:1100}});const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ assert.equal((await context.request.post(origin+'/api/auth/login',{headers:{Origin:origin,'X-AX-Request':'1'},data:{employee_id:fixture.employee_id,password:fixture.password}})).status(),200);
+ await page.goto(origin+'/wiavoice/#my-voice');await expect(page.locator('.library-card')).toHaveCount(6);
+ await expect(page.getByText('saved voices',{exact:true})).toHaveCount(0);await expect(page.getByText('로그아웃 후에도 안전하게 보관됩니다.',{exact:true})).toHaveCount(0);
+ await expect(page.locator('.library-pagination')).toContainText('1 / 3');await expect(page.getByRole('button',{name:'이전',exact:true})).toBeDisabled();
+ const first=await page.locator('.library-card h2').allTextContents();assert.deepEqual(first,['목소리 13','목소리 12','목소리 11','목소리 10','목소리 09','목소리 08']);
+ await page.screenshot({path:'test-results/myvoice-six-cards.png',fullPage:true});
+ await page.getByRole('button',{name:'다음',exact:true}).click();await expect(page.locator('.library-card h2').first()).toHaveText('목소리 07');await expect(page.locator('.library-card')).toHaveCount(6);await expect(page.locator('.library-pagination')).toContainText('2 / 3');
+ await page.getByRole('button',{name:'다음',exact:true}).click();await expect(page.locator('.library-card')).toHaveCount(1);await expect(page.locator('.library-pagination')).toContainText('3 / 3');await expect(page.getByRole('button',{name:'다음',exact:true})).toBeDisabled();
+ const last=await (await context.request.get(origin+'/wiavoice/api/my-voices?offset=12')).json();const deleted=[last.items[0].voice_id];
+ await page.locator('.library-delete').click();const popup=page.getByRole('dialog');await expect(popup.getByRole('button',{name:'취소',exact:true})).toBeFocused();
+ await popup.screenshot({path:'test-results/myvoice-delete-dialog.png'});await popup.getByRole('button',{name:'취소',exact:true}).click();await expect(popup).toHaveCount(0);await expect(page.locator('.library-card')).toHaveCount(1);
+ await page.locator('.library-delete').click();await page.getByRole('dialog').getByRole('button',{name:'삭제',exact:true}).click();
+ await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.locator('.library-card')).toHaveCount(6);await expect(page.locator('.library-pagination')).toContainText('2 / 2');
+ assert.equal((await context.request.get(origin+last.items[0].audio_url)).status(),404);
+ const second=await (await context.request.get(origin+'/wiavoice/api/my-voices?offset=6')).json();deleted.push(second.items[0].voice_id);
+ await page.locator('.library-delete').first().click();await page.getByRole('dialog').getByRole('button',{name:'삭제',exact:true}).click();await expect(page.locator('.library-card')).toHaveCount(5);
+ await page.getByRole('button',{name:'이전',exact:true}).click();await expect(page.locator('.library-card')).toHaveCount(6);await expect(page.locator('.library-pagination')).toContainText('1 / 2');
+ await page.setViewportSize({width:1200,height:900});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=1200));
+ assert.deepEqual(errors,[]);
+ await writeFile('/tmp/wiavoice-delete-result.json',JSON.stringify({user_id:fixture.user_id,deleted}));
+ await context.request.post(origin+'/wiavoice/api/auth/logout',{headers:{Origin:origin}});
+ console.log('Six-item pages, 7–12 navigation, confirmation/cancel, delete and final-page fallback verified');
+}finally{await browser.close();}
