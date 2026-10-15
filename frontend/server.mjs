@@ -54,5 +54,5 @@ const server=http.createServer(async(req,res)=>{
  }catch{error(res,500,'Unable to serve frontend');}
 });
 server.requestTimeout=120000;
-server.listen(Number(process.env.FRONTEND_PORT||1005),'0.0.0.0',()=>console.log('WiaVoice frontend listening on '+(process.env.FRONTEND_PORT||1005)));
+server.listen(Number(process.env.FRONTEND_PORT||1005),'127.0.0.1',()=>console.log('WiaVoice frontend listening on '+(process.env.FRONTEND_PORT||1005)));
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),10000).unref();});
